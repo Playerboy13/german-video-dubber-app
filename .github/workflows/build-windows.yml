@@ -8,6 +8,9 @@ on:
 jobs:
   build-and-test:
     runs-on: windows-latest
+    env:
+      PYTHONIOENCODING: "utf-8"
+      PYTHONUTF8: "1"
     steps:
       - name: Code auschecken
         uses: actions/checkout@v4
@@ -46,9 +49,12 @@ jobs:
         run: |
           $exe = "app/dist/GermanVideoDubber/GermanVideoDubber.exe"
           Write-Host "Fuehre Selbsttest aus: $exe --selftest"
-          & $exe --selftest
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Selbsttest fehlgeschlagen (Exit-Code $LASTEXITCODE)"
+          $proc = Start-Process -FilePath $exe -ArgumentList "--selftest" -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput "selftest_out.txt" -RedirectStandardError "selftest_err.txt"
+          Get-Content "selftest_out.txt"
+          Get-Content "selftest_err.txt"
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "Selbsttest fehlgeschlagen (Exit-Code $($proc.ExitCode))"
             exit 1
           }
           Write-Host "Selbsttest erfolgreich."
@@ -100,9 +106,12 @@ jobs:
             exit 1
           }
           Write-Host "Installierte App gefunden unter: $found"
-          & $found --selftest
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Selbsttest der INSTALLIERTEN App ist fehlgeschlagen."
+          $proc2 = Start-Process -FilePath $found -ArgumentList "--selftest" -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput "installed_selftest_out.txt" -RedirectStandardError "installed_selftest_err.txt"
+          Get-Content "installed_selftest_out.txt"
+          Get-Content "installed_selftest_err.txt"
+          if ($proc2.ExitCode -ne 0) {
+            Write-Error "Selbsttest der INSTALLIERTEN App ist fehlgeschlagen (Exit-Code $($proc2.ExitCode))."
             exit 1
           }
           Write-Host "Installierte App funktioniert (Selbsttest bestanden)."
