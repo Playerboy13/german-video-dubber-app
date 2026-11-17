@@ -1,0 +1,127 @@
+name: Windows-Installer bauen und testen
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python-Abhängigkeiten installieren
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r app/requirements.txt
+
+      - name: ffmpeg (Windows-Build) herunterladen und entpacken
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "ffmpeg.zip"
+          Expand-Archive -Path "ffmpeg.zip" -DestinationPath "ffmpeg_extracted"
+          $ffmpegExe = Get-ChildItem -Path "ffmpeg_extracted" -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path "app/bin" | Out-Null
+          Copy-Item $ffmpegExe.FullName -Destination "app/bin/ffmpeg.exe"
+          Write-Host "ffmpeg bereitgestellt unter app/bin/ffmpeg.exe"
+
+      - name: App mit PyInstaller bauen
+        shell: pwsh
+        run: |
+          cd app
+          pyinstaller --name GermanVideoDubber --windowed --onedir `
+            --add-binary "bin/ffmpeg.exe;bin" `
+            main.py
+
+      - name: Selbsttest ausführen (echter Windows-Server)
+        shell: pwsh
+        run: |
+          $exe = "app/dist/GermanVideoDubber/GermanVideoDubber.exe"
+          Write-Host "Fuehre Selbsttest aus: $exe --selftest"
+          & $exe --selftest
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Selbsttest fehlgeschlagen (Exit-Code $LASTEXITCODE)"
+            exit 1
+          }
+          Write-Host "Selbsttest erfolgreich."
+
+      - name: Inno Setup installieren
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+
+      - name: Installer (.exe) bauen
+        shell: pwsh
+        run: |
+          cd installer
+          New-Item -ItemType Directory -Force -Path "output" | Out-Null
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+
+      - name: Installer-Datei prüfen (existiert & hat plausible Größe)
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path "installer/output" -Filter "*.exe" | Select-Object -First 1
+          if (-not $installer) {
+            Write-Error "Keine Installer-.exe gefunden!"
+            exit 1
+          }
+          $sizeMB = [math]::Round($installer.Length / 1MB, 1)
+          Write-Host "Installer gefunden: $($installer.Name) ($sizeMB MB)"
+          if ($sizeMB -lt 5) {
+            Write-Error "Installer wirkt verdaechtig klein ($sizeMB MB) - vermutlich fehlt etwas (z.B. ffmpeg nicht gebuendelt)."
+            exit 1
+          }
+
+      - name: Installer testweise installieren (silent) und Dateien prüfen
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path "installer/output" -Filter "*.exe" | Select-Object -First 1
+          Start-Process -FilePath $installer.FullName -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+          $installedExe = Join-Path $env:LOCALAPPDATA "Programs\Deutscher Video-Synchronisierer\GermanVideoDubber.exe"
+          $altExe = "C:\Program Files\Deutscher Video-Synchronisierer\GermanVideoDubber.exe"
+          $found = $null
+          foreach ($candidate in @($installedExe, $altExe)) {
+            if (Test-Path $candidate) { $found = $candidate; break }
+          }
+          if (-not $found) {
+            # Fallback: irgendwo im Dateisystem suchen
+            $found = Get-ChildItem -Path "C:\Program Files*","$env:LOCALAPPDATA\Programs" -Recurse -Filter "GermanVideoDubber.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $found) {
+            Write-Error "Nach der Installation wurde die GermanVideoDubber.exe nicht gefunden."
+            exit 1
+          }
+          Write-Host "Installierte App gefunden unter: $found"
+          & $found --selftest
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Selbsttest der INSTALLIERTEN App ist fehlgeschlagen."
+            exit 1
+          }
+          Write-Host "Installierte App funktioniert (Selbsttest bestanden)."
+
+      - name: Installer als Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: GermanVideoDubber-Setup
+          path: installer/output/*.exe
+          retention-days: 30
+
+      - name: Release mit Installer erstellen
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "build-${{ github.run_number }}"
+          name: "Deutscher Video-Synchronisierer - Build ${{ github.run_number }}"
+          files: installer/output/*.exe
+          body: |
+            Automatisch gebaut und getestet (Installation + Selbsttest auf einem echten Windows-Server).
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
